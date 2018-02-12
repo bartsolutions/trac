@@ -46,6 +46,7 @@
       </div>
 
       <form id="query" method="post" action="${href.query()}"
+            py:if="'REPORT_VIEW' in perm(report_resource)"
             py:with="field_names = sorted(fields.iterkeys(), key=lambda name: fields[name].label.lower())">
         <fieldset id="filters">
           <legend class="foldable">Filters</legend>

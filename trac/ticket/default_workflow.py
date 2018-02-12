@@ -254,9 +254,9 @@ Read TracWorkflow for more information (don't forget to 'wiki upgrade' as well)
                 owners = self._to_users(this_action['set_owner'], ticket)
             elif self.config.getbool('ticket', 'restrict_owner'):
                 perm = PermissionSystem(self.env)
-                owners = perm.get_users_with_permission('TICKET_MODIFY')
+                owners = perm.get_users_with_permission('TICKET_APPEND')
                 owners = [user for user in owners
-                               if 'TICKET_MODIFY'
+                               if 'TICKET_APPEND'
                                in PermissionCache(self.env, user,
                                                   ticket.resource)]
                 owners = sorted(owners)

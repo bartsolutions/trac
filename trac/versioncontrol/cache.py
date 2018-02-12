@@ -266,6 +266,12 @@ class CachedRepository(Repository):
             if invalidate:
                 del self.metadata
 
+    def _convert_trac_author(self, author_name):
+        if(author_name.find("@") >= 0)
+            return author_name.split("@")[0]
+
+        return author_name
+
     def insert_changeset(self, rev, cset):
         """Create revision and node_change records for the given changeset
         instance."""
@@ -284,7 +290,7 @@ class CachedRepository(Repository):
             INSERT INTO revision (repos,rev,time,author,message)
             VALUES (%s,%s,%s,%s,%s)
             """, (self.id, srev, to_utimestamp(cset.date),
-                  cset.author, cset.message))
+                  self._convert_trac_author(cset.author), cset.message))
         # 2. now *only* one process was able to get there (i.e. there
         # *shouldn't* be any race condition here)
         for path, kind, action, bpath, brev in cset.get_changes():

@@ -463,9 +463,9 @@ class TicketSystem(Component):
         if self.restrict_owner:
             allowed_owners = []
             for user in PermissionSystem(self.env) \
-                        .get_users_with_permission('TICKET_MODIFY'):
+                        .get_users_with_permission('TICKET_APPEND'):
                 if not ticket or \
-                        'TICKET_MODIFY' in PermissionCache(self.env, user,
+                        'TICKET_APPEND' in PermissionCache(self.env, user,
                                                            ticket.resource):
                     allowed_owners.append(user)
             allowed_owners.sort()
