@@ -267,7 +267,7 @@ class CachedRepository(Repository):
                 del self.metadata
 
     def _convert_trac_author(self, author_name):
-        if(author_name.find("@") >= 0)
+        if author_name.find("@") >= 0:
             return author_name.split("@")[0]
 
         return author_name
