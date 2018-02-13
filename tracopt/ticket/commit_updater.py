@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2009-2014 Edgewall Software
+# Copyright (C) 2009 Edgewall Software
 # All rights reserved.
 #
 # This software is licensed as described in the file COPYING, which
@@ -35,17 +35,18 @@
 # IN THE SOFTWARE.
 # ----------------------------------------------------------------------------
 
+from __future__ import with_statement
+
 import re
 
 from genshi.builder import tag
 
 from trac.config import BoolOption, Option
 from trac.core import Component, implements
-from trac.notification.api import NotificationSystem
 from trac.perm import PermissionCache
 from trac.resource import Resource
 from trac.ticket import Ticket
-from trac.ticket.notification import TicketChangeEvent
+from trac.ticket.notification import TicketNotifyEmail
 from trac.util.datefmt import datetime_now, utc
 from trac.util.text import exception_to_unicode
 from trac.util.translation import _, cleandoc_
@@ -53,7 +54,6 @@ from trac.versioncontrol import IRepositoryChangeListener, RepositoryManager
 from trac.versioncontrol.web_ui.changeset import ChangesetModule
 from trac.wiki.formatter import format_to_html
 from trac.wiki.macros import WikiMacroBase
-
 
 class CommitTicketUpdater(Component):
     """Update tickets based on commit messages.
@@ -74,13 +74,6 @@ class CommitTicketUpdater(Component):
     command ticket:1, ticket:2
     command ticket:1 & ticket:2
     command ticket:1 and ticket:2
-    }}}
-
-    Using the long-form syntax allows a comment to be included in the
-    reference, e.g.:
-    {{{
-    command ticket:1#comment:1
-    command ticket:1#comment:description
     }}}
 
     In addition, the ':' character can be omitted and issue or bug can be used
@@ -112,8 +105,8 @@ class CommitTicketUpdater(Component):
     envelope = Option('ticket', 'commit_ticket_update_envelope', '',
         """Require commands to be enclosed in an envelope.
 
-        Must be empty or contain two characters. For example, if set to `[]`,
-        then commands must be in the form of `[closes #4]`.""")
+        Must be empty or contain two characters. For example, if set to "[]",
+        then commands must be in the form of [closes #4].""")
 
     commands_close = Option('ticket', 'commit_ticket_update_commands.close',
         'close closed closes fix fixed fixes',
@@ -123,7 +116,7 @@ class CommitTicketUpdater(Component):
         'addresses re references refs see',
         """Commands that add a reference, as a space-separated list.
 
-        If set to the special value `<ALL>`, all tickets referenced by the
+        If set to the special value <ALL>, all tickets referenced by the
         message will get a reference to the changeset.""")
 
     check_perms = BoolOption('ticket', 'commit_ticket_update_check_perms',
@@ -138,16 +131,20 @@ class CommitTicketUpdater(Component):
         """Send ticket change notification when updating a ticket.""")
 
     ticket_prefix = '(?:#|(?:ticket|issue|bug)[: ]?)'
-    ticket_reference = ticket_prefix + \
-                       '[0-9]+(?:#comment:([0-9]+|description))?'
+    ticket_reference = ticket_prefix + '[0-9]+'
+
+    #added by walty, the whole worked hours logic
+    ticket_time = '(?: ?\((?P<time>[0-9]*\.?[0-9]+)\))?'
     ticket_command = (r'(?P<action>[A-Za-z]*)\s*.?\s*'
-                      r'(?P<ticket>%s(?:(?:[, &]*|[ ]?and[ ]?)%s)*)' %
-                      (ticket_reference, ticket_reference))
+                      r'(?P<ticket>%s(?:(?:[, &]*|[ ]?and[ ]?)%s)*)'
+                      r'%s' %
+                      (ticket_reference, ticket_reference, ticket_time))
+
 
     @property
     def command_re(self):
-        begin, end = (re.escape(self.envelope[0:1]),
-                      re.escape(self.envelope[1:2]))
+        (begin, end) = (re.escape(self.envelope[0:1]),
+                        re.escape(self.envelope[1:2]))
         return re.compile(begin + self.ticket_command + end)
 
     ticket_re = re.compile(ticket_prefix + '([0-9]+)')
@@ -157,46 +154,72 @@ class CommitTicketUpdater(Component):
     # IRepositoryChangeListener methods
 
     def changeset_added(self, repos, changeset):
+        self.log.debug("Ticket commit updater, changeset added")
         if self._is_duplicate(changeset):
             return
+
         tickets = self._parse_message(changeset.message)
         comment = self.make_ticket_comment(repos, changeset)
-        self._update_tickets(tickets, changeset, comment, datetime_now(utc))
+        self._update_tickets(tickets, changeset, comment,
+                             datetime_now(utc))
+
 
     def changeset_modified(self, repos, changeset, old_changeset):
+        self.log.debug("Ticket commit updater, changeset modified")
         if self._is_duplicate(changeset):
             return
-        tickets = self._parse_message(changeset.message)
+
+        [tickets, changesets] = self._parse_message(message)
         old_tickets = {}
         if old_changeset is not None:
-            old_tickets = self._parse_message(old_changeset.message)
+            [old_tickets, changesets] = self._parse_message(message)
         tickets = dict(each for each in tickets.iteritems()
                        if each[0] not in old_tickets)
         comment = self.make_ticket_comment(repos, changeset)
-        self._update_tickets(tickets, changeset, comment, datetime_now(utc))
+        self._update_tickets(tickets, changeset, comment,
+                             datetime_now(utc))
+
+
+    def comment_exists(self, ticket, comment):
+        query = 'SELECT count(1) from ticket_change ' \
+                                   'where field=\'comment\' and ticket=%s and newvalue = %s' 
+        rows = self.env.db_query(query, (ticket.id, comment))
+        exists =  (rows[0][0] != 0)
+
+        return exists
+
 
     def _is_duplicate(self, changeset):
         # Avoid duplicate changes with multiple scoped repositories
         cset_id = (changeset.rev, changeset.message, changeset.author,
                    changeset.date)
+
         if cset_id != self._last_cset_id:
             self._last_cset_id = cset_id
             return False
+
+        query = 'SELECT count(1) from revision rev ' \
+                                    'join repository rep on rev.repos = rep.id ' \
+                                   'where rev.rev = %s and rep.value = %s and rep.name = \'name\'' 
+        rows = self.env.db_query(query, (changeset, repos.reponame))
         return True
+
 
     def _parse_message(self, message):
         """Parse the commit message and return the ticket references."""
         cmd_groups = self.command_re.finditer(message)
         functions = self._get_functions()
+        #import traceback; traceback.print_stack()
         tickets = {}
         for m in cmd_groups:
-            cmd, tkts = m.group('action', 'ticket')
+            cmd, tkts, time = m.group('action', 'ticket', 'time')
             func = functions.get(cmd.lower())
             if not func and self.commands_refs.strip() == '<ALL>':
                 func = self.cmd_refs
             if func:
                 for tkt_id in self.ticket_re.findall(tkts):
-                    tickets.setdefault(int(tkt_id), []).append(func)
+                    tickets.setdefault(int(tkt_id), []).append((func, time))
+
         return tickets
 
     def make_ticket_comment(self, repos, changeset):
@@ -220,30 +243,52 @@ In [changeset:"%s" %s]:
         perm = PermissionCache(self.env, authname)
         for tkt_id, cmds in tickets.iteritems():
             try:
-                self.log.debug("Updating ticket #%d", tkt_id)
+                self.log.debug("Updating ticket #%d, %s", tkt_id, cmds)
                 save = False
                 with self.env.db_transaction:
                     ticket = Ticket(self.env, tkt_id)
                     ticket_perm = perm(ticket.resource)
-                    for cmd in cmds:
-                        if cmd(ticket, changeset, ticket_perm) is not False:
-                            save = True
+                    for cmd, time in cmds:
+                        self.log.debug("Ticket Commit Updater Command: %s, %s, %s, %s", tkt_id, ticket, cmd, time)
+                        if time:        #worked hours specified
+                            total_worked_hours = 0
+                            try:
+                                total_worked_hours = float(ticket["worked_hours"])
+                            except:
+                                self.log.debug('Initial worked hour not found')
+
+                            ticket["worked_hours"] = str(total_worked_hours + float(time))   #update the worked hours
+                            print "Worked hours changed by:", time
+
+
+                        save = True
+                        if cmd(ticket, changeset, ticket_perm) is False:
+                            print "No permission to change the ticket!"
+                            save = False
+
+                        if self.comment_exists(ticket, comment):
+                            print "Comment already exist for the ticket!"
+                            save = False
+
                     if save:
                         ticket.save_changes(authname, comment, date)
+                        print "**** ticket updated ****"
                 if save:
-                    self._notify(ticket, date, changeset.author, comment)
-            except Exception as e:
+                    self._notify(ticket, date)
+            except Exception, e:
+                print "Unexpected error while processing ticket #%s: %s" % (tkt_id, exception_to_unicode(e))
+
                 self.log.error("Unexpected error while processing ticket "
                                "#%s: %s", tkt_id, exception_to_unicode(e))
 
-    def _notify(self, ticket, date, author, comment):
+    def _notify(self, ticket, date):
         """Send a ticket update notification."""
         if not self.notify:
             return
-        event = TicketChangeEvent('changed', ticket, date, author, comment)
+        tn = TicketNotifyEmail(self.env)
         try:
-            NotificationSystem(self.env).notify(event)
-        except Exception as e:
+            tn.notify(ticket, newticket=False, modtime=date)
+        except Exception, e:
             self.log.error("Failure sending notification on change to "
                            "ticket #%s: %s", ticket.id,
                            exception_to_unicode(e))
@@ -260,26 +305,21 @@ In [changeset:"%s" %s]:
         return functions
 
     def _authname(self, changeset):
-        """Returns the author of the changeset, normalizing the casing if
-        [trac] ignore_author_case is true."""
+        author_name = changeset.author.lower()
+
+        #here do the mapping from git user name to trac user name
+        if author_name.find(" "):
+            return author_name.split(" ")[0]
+
+        if author_name.find("@"):
+            return author_name.split("@")[0]
+
         return changeset.author.lower() \
                if self.env.config.getbool('trac', 'ignore_auth_case') \
                else changeset.author
 
     # Command-specific behavior
     # The ticket isn't updated if all extracted commands return False.
-
-    def cmd_close(self, ticket, changeset, perm):
-        authname = self._authname(changeset)
-        if self.check_perms and not 'TICKET_MODIFY' in perm:
-            self.log.info("%s doesn't have TICKET_MODIFY permission for #%d",
-                          authname, ticket.id)
-            return False
-        ticket['status'] = 'closed'
-        ticket['resolution'] = 'fixed'
-        if not ticket['owner']:
-            ticket['owner'] = authname
-
     def cmd_refs(self, ticket, changeset, perm):
         if self.check_perms and not 'TICKET_APPEND' in perm:
             self.log.info("%s doesn't have TICKET_APPEND permission for #%d",
